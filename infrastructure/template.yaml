@@ -1,0 +1,515 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Home Security System - Face Recognition Framework
+  Serverless backend with Rekognition, DynamoDB, S3, SQS, SNS
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        RAW_BUCKET: !Ref RawImagesBucket
+        THUMB_BUCKET: !Ref ThumbnailsBucket
+        DETECTIONS_TABLE: !Ref DetectionsTable
+        DEVICE_STATUS_TABLE: !Ref DeviceStatusTable
+        KNOWN_PERSONS_TABLE: !Ref KnownPersonsTable
+        NOTIFICATION_TOPIC_ARN: !Ref NotificationTopic
+        DEVICE_ALERT_TOPIC_ARN: !Ref DeviceAlertTopic
+        REKOGNITION_COLLECTION_ID: home-security-faces
+        THUMBNAIL_SIZE: "200"
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  PresignedUrlExpiry:
+    Type: Number
+    Default: 300
+    Description: Pre-signed URL expiry in seconds (60-300)
+
+  DeviceOfflineThresholdMinutes:
+    Type: Number
+    Default: 10
+    Description: Minutes before a device is considered offline
+
+  NotificationCooldownSeconds:
+    Type: Number
+    Default: 60
+    Description: Minimum seconds between notifications per device
+
+  DetectionTtlDays:
+    Type: Number
+    Default: 90
+    Description: Days before detection records expire from DynamoDB
+
+  TelegramBotToken:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Telegram bot token for direct alerts
+
+  TelegramChatId:
+    Type: String
+    Default: ""
+    Description: Telegram chat ID for direct alerts
+
+Resources:
+  # ============================================================
+  # S3 BUCKETS
+  # ============================================================
+  RawImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub home-security-raw-${Environment}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveOldImages
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 30
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, PUT]
+            AllowedOrigins: ["*"]
+            MaxAge: 3600
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:Put
+            Queue: !GetAtt ImageProcessingQueue.Arn
+
+  ThumbnailsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub home-security-thumb-${Environment}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET]
+            AllowedOrigins: ["*"]
+            MaxAge: 3600
+
+  # ============================================================
+  # SQS QUEUES
+  # ============================================================
+  ImageProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub home-security-image-queue-${Environment}
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ImageProcessingDLQ.Arn
+        maxReceiveCount: 3
+
+  ImageProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub home-security-image-dlq-${Environment}
+      MessageRetentionPeriod: 1209600
+
+  ImageProcessingQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ImageProcessingQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt ImageProcessingQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt RawImagesBucket.Arn
+
+  # ============================================================
+  # DYNAMODB TABLES
+  # ============================================================
+  DetectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub home-security-detections-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: deviceId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+        - AttributeName: personIdStatus
+          AttributeType: S
+        - AttributeName: dateKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: deviceId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI-PersonStatus
+          KeySchema:
+            - AttributeName: personIdStatus
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI-ByTime
+          KeySchema:
+            - AttributeName: dateKey
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  DeviceStatusTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub home-security-device-status-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: deviceId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: deviceId
+          KeyType: HASH
+
+  KnownPersonsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub home-security-known-persons-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: personId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: personId
+          KeyType: HASH
+
+  # ============================================================
+  # SNS TOPICS
+  # ============================================================
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub home-security-notifications-${Environment}
+
+  DeviceAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub home-security-device-alerts-${Environment}
+
+  # ============================================================
+  # API GATEWAY
+  # ============================================================
+  SecurityApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub home-security-api-${Environment}
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Api-Key,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        ApiKeyRequired: true
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          UsagePlanName: !Sub home-security-usage-plan-${Environment}
+
+  # ============================================================
+  # LAMBDA FUNCTIONS
+  # ============================================================
+
+  # --- Generate Pre-signed URL ---
+  GeneratePresignedUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub home-security-presigned-url-${Environment}
+      CodeUri: ../backend/lambdas/generate_presigned_url/
+      Handler: handler.lambda_handler
+      Environment:
+        Variables:
+          PRESIGNED_URL_EXPIRY: !Ref PresignedUrlExpiry
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref RawImagesBucket
+      Events:
+        PostPresignedUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SecurityApi
+            Path: /api/presigned-url
+            Method: POST
+
+  # --- Process Image ---
+  ProcessImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub home-security-process-image-${Environment}
+      CodeUri: ../backend/lambdas/process_image/
+      Handler: handler.lambda_handler
+      Timeout: 120
+      MemorySize: 512
+      ReservedConcurrentExecutions: 5
+      Environment:
+        Variables:
+          NOTIFICATION_COOLDOWN_SECONDS: !Ref NotificationCooldownSeconds
+          DETECTION_TTL_DAYS: !Ref DetectionTtlDays
+          TELEGRAM_BOT_TOKEN: !Ref TelegramBotToken
+          TELEGRAM_CHAT_ID: !Ref TelegramChatId
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref RawImagesBucket
+        - S3CrudPolicy:
+            BucketName: !Ref ThumbnailsBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DetectionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DeviceStatusTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationTopic.TopicName
+        - RekognitionDetectOnlyPolicy: {}
+        - Statement:
+            - Effect: Allow
+              Action:
+                - rekognition:SearchFacesByImage
+                - rekognition:DetectFaces
+              Resource: "*"
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ImageProcessingQueue.Arn
+            BatchSize: 1
+
+  # --- Manage Rekognition Collection ---
+  ManageCollectionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub home-security-manage-collection-${Environment}
+      CodeUri: ../backend/lambdas/manage_collection/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KnownPersonsTable
+        - S3ReadPolicy:
+            BucketName: !Ref RawImagesBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - rekognition:CreateCollection
+                - rekognition:DeleteCollection
+                - rekognition:IndexFaces
+                - rekognition:DeleteFaces
+                - rekognition:ListFaces
+                - rekognition:SearchFacesByImage
+              Resource: "*"
+      Events:
+        CreateCollection:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SecurityApi
+            Path: /api/collection
+            Method: POST
+        IndexFace:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SecurityApi
+            Path: /api/collection/faces
+            Method: POST
+        DeleteFace:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SecurityApi
+            Path: /api/collection/faces
+            Method: DELETE
+        ListFaces:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SecurityApi
+            Path: /api/collection/faces
+            Method: GET
+
+  # --- Notify Zalo ---
+  NotifyZaloFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub home-security-notify-zalo-${Environment}
+      CodeUri: ../backend/lambdas/notify_zalo/
+      Handler: handler.lambda_handler
+      Environment:
+        Variables:
+          ZALO_OA_ACCESS_TOKEN: "{{resolve:ssm:/home-security/zalo-oa-token}}"
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref ThumbnailsBucket
+      Events:
+        SNSEvent:
+          Type: SNS
+          Properties:
+            Topic: !Ref NotificationTopic
+
+  # --- Notify Telegram ---
+  NotifyTelegramFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub home-security-notify-telegram-${Environment}
+      CodeUri: ../backend/lambdas/notify_telegram/
+      Handler: handler.lambda_handler
+      Environment:
+        Variables:
+          TELEGRAM_BOT_TOKEN: !Ref TelegramBotToken
+          TELEGRAM_CHAT_ID: !Ref TelegramChatId
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref ThumbnailsBucket
+      Events:
+        SNSEvent:
+          Type: SNS
+          Properties:
+            Topic: !Ref NotificationTopic
+        DeviceAlertSNS:
+          Type: SNS
+          Properties:
+            Topic: !Ref DeviceAlertTopic
+
+  # --- Device Health Check ---
+  DeviceHealthCheckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub home-security-device-health-${Environment}
+      CodeUri: ../backend/lambdas/device_health_check/
+      Handler: handler.lambda_handler
+      Environment:
+        Variables:
+          DEVICE_OFFLINE_THRESHOLD_MINUTES: !Ref DeviceOfflineThresholdMinutes
+          TELEGRAM_BOT_TOKEN: !Ref TelegramBotToken
+          TELEGRAM_CHAT_ID: !Ref TelegramChatId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DeviceStatusTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt DeviceAlertTopic.TopicName
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Description: Check device health every 5 minutes
+            Enabled: true
+
+  # --- Device Heartbeat API ---
+  HeartbeatFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub home-security-heartbeat-${Environment}
+      CodeUri: ../backend/lambdas/device_health_check/
+      Handler: heartbeat_handler.heartbeat_handler
+      Environment:
+        Variables:
+          TELEGRAM_BOT_TOKEN: !Ref TelegramBotToken
+          TELEGRAM_CHAT_ID: !Ref TelegramChatId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DeviceStatusTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt DeviceAlertTopic.TopicName
+      Events:
+        PostHeartbeat:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SecurityApi
+            Path: /api/devices/heartbeat
+            Method: POST
+
+  # --- Web App API: Query Events ---
+  QueryEventsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub home-security-query-events-${Environment}
+      CodeUri: ../backend/lambdas/process_image/
+      Handler: handler.query_events_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DetectionsTable
+        - S3ReadPolicy:
+            BucketName: !Ref RawImagesBucket
+        - S3ReadPolicy:
+            BucketName: !Ref ThumbnailsBucket
+      Events:
+        GetEvents:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SecurityApi
+            Path: /api/events
+            Method: GET
+
+  # --- Web App API: Device Status ---
+  QueryDevicesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub home-security-query-devices-${Environment}
+      CodeUri: ../backend/lambdas/device_health_check/
+      Handler: handler.query_devices_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DeviceStatusTable
+      Events:
+        GetDevices:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SecurityApi
+            Path: /api/devices
+            Method: GET
+
+# ============================================================
+# OUTPUTS
+# ============================================================
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${SecurityApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+
+  RawBucketName:
+    Description: Raw images S3 bucket
+    Value: !Ref RawImagesBucket
+
+  ThumbBucketName:
+    Description: Thumbnails S3 bucket
+    Value: !Ref ThumbnailsBucket
+
+  DetectionsTableName:
+    Description: Detections DynamoDB table
+    Value: !Ref DetectionsTable
+
+  DeviceStatusTableName:
+    Description: Device Status DynamoDB table
+    Value: !Ref DeviceStatusTable
+
+  NotificationTopicArn:
+    Description: Notification SNS topic ARN
+    Value: !Ref NotificationTopic
+
+  DeviceAlertTopicArn:
+    Description: Device Alert SNS topic ARN
+    Value: !Ref DeviceAlertTopic

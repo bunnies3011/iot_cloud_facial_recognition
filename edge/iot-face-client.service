@@ -1,0 +1,16 @@
+[Unit]
+Description=IoT Home Security - Face Recognition Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/iot_cloud_home_security/edge
+EnvironmentFile=/home/pi/iot_cloud_home_security/edge/.env
+ExecStart=/usr/bin/python3 main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

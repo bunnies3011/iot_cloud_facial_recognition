@@ -1,7 +1,12 @@
+import os
+
 import requests
 
-TELEGRAM_BOT_TOKEN="8609329859:AAGvv0O2Pvwoa_ZXQOnef7aqO6Evq1F8wc4"
-TELEGRAM_CHAT_ID="5880878517"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    raise RuntimeError("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID before running this test")
 
 message = "Hello, this is a test message from the Telegram bot!"
 

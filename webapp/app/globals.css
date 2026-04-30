@@ -1026,6 +1026,20 @@ tr:hover td {
   color: var(--accent-red-dark);
 }
 
+.result-box-header,
+.result-box-details {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.result-box-details {
+  color: var(--text-primary);
+  font-weight: 650;
+  margin-top: 10px;
+}
+
 .detection-card {
   display: grid;
   grid-template-columns: 74px minmax(0, 1fr);

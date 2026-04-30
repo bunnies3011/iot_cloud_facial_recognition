@@ -2,22 +2,33 @@
 
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { getPresignedUrl, uploadToS3, usePolling } from "@/lib/api";
-import type { DetectionEvent } from "@/lib/types";
+import type { DetectionEvent, DetectionStatus } from "@/lib/types";
 
 type EventsResponse = { events: DetectionEvent[] };
 type SimStatus = "idle" | "capturing" | "uploading" | "processing" | "result" | "error";
+const LIVE_CAPTURE_INTERVAL_MS = 3500;
 
 export default function SimulatePage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const liveTimerRef = useRef<number | null>(null);
+  const liveActiveRef = useRef(false);
+  const uploadInFlightRef = useRef(false);
   const [status, setStatus] = useState<SimStatus>("idle");
   const [message, setMessage] = useState("");
-  const [uploadedKey, setUploadedKey] = useState<string | null>(null);
-  const { data } = usePolling<EventsResponse>("/api/detections?limit=10", 3000);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [liveMode, setLiveMode] = useState(false);
+  const [uploadedKeys, setUploadedKeys] = useState<string[]>([]);
+  const { data } = usePolling<EventsResponse>("/api/detections?limit=10", 1000);
 
   useEffect(() => {
     return () => {
+      liveActiveRef.current = false;
+      if (liveTimerRef.current !== null) {
+        window.clearInterval(liveTimerRef.current);
+        liveTimerRef.current = null;
+      }
       streamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
@@ -44,16 +55,22 @@ export default function SimulatePage() {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
+      setCameraReady(true);
       setMessage("Camera is ready");
+      return true;
     } catch (err) {
       setStatus("error");
       setMessage(cameraErrorMessage(err));
+      setCameraReady(false);
+      return false;
     }
   }
 
   function stopCamera(updateStatus = true) {
+    stopLiveDetection(false);
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+    setCameraReady(false);
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
@@ -63,16 +80,87 @@ export default function SimulatePage() {
     }
   }
 
+  async function startLiveDetection() {
+    if (liveMode) {
+      return;
+    }
+
+    const ready = streamRef.current ? true : await startCamera();
+    if (!ready) {
+      return;
+    }
+
+    setLiveMode(true);
+    liveActiveRef.current = true;
+    setStatus("processing");
+    setMessage("Live detection running");
+    await processLiveFrame();
+    if (liveActiveRef.current) {
+      liveTimerRef.current = window.setInterval(processLiveFrame, LIVE_CAPTURE_INTERVAL_MS);
+    }
+  }
+
+  function stopLiveDetection(updateStatus = true) {
+    liveActiveRef.current = false;
+    if (liveTimerRef.current !== null) {
+      window.clearInterval(liveTimerRef.current);
+      liveTimerRef.current = null;
+    }
+    setLiveMode(false);
+    if (updateStatus) {
+      setStatus(streamRef.current ? "capturing" : "idle");
+      setMessage(streamRef.current ? "Camera is ready" : "Camera stopped");
+    }
+  }
+
+  async function processLiveFrame() {
+    if (uploadInFlightRef.current || !streamRef.current || !liveActiveRef.current) {
+      return;
+    }
+
+    uploadInFlightRef.current = true;
+    try {
+      const blob = await captureCameraBlob();
+      if (!blob) {
+        return;
+      }
+      const key = await uploadBlob(blob, "live");
+      trackUploadedKey(key);
+    } catch (err) {
+      setStatus("error");
+      setMessage(err instanceof Error ? err.message : "Live detection failed");
+      stopLiveDetection(false);
+    } finally {
+      uploadInFlightRef.current = false;
+    }
+  }
+
   async function captureFrame() {
+    stopLiveDetection(false);
+    const blob = await captureCameraBlob();
+    if (!blob) {
+      return;
+    }
+
+    try {
+      const key = await uploadBlob(blob, "manual");
+      trackUploadedKey(key);
+    } catch (err) {
+      setStatus("error");
+      setMessage(err instanceof Error ? err.message : "Upload failed");
+    }
+  }
+
+  async function captureCameraBlob() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) {
-      return;
+      return null;
     }
     if (!streamRef.current || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
       setStatus("error");
       setMessage("Start the camera before capturing");
-      return;
+      return null;
     }
 
     canvas.width = video.videoWidth || 640;
@@ -82,21 +170,15 @@ export default function SimulatePage() {
     const blob = await new Promise<Blob | null>((resolve) =>
       canvas.toBlob(resolve, "image/jpeg", 0.9),
     );
-    if (blob) {
-      try {
-        await uploadBlob(blob);
-      } catch (err) {
-        setStatus("error");
-        setMessage(err instanceof Error ? err.message : "Upload failed");
-      }
-    }
+    return blob;
   }
 
   async function handleFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (file) {
       try {
-        await uploadBlob(file);
+        const key = await uploadBlob(file, "manual");
+        trackUploadedKey(key);
       } catch (err) {
         setStatus("error");
         setMessage(err instanceof Error ? err.message : "Upload failed");
@@ -104,23 +186,30 @@ export default function SimulatePage() {
     }
   }
 
-  async function uploadBlob(blob: Blob) {
+  async function uploadBlob(blob: Blob, mode: "live" | "manual") {
     setStatus("uploading");
-    setMessage("Uploading frame");
+    setMessage(mode === "live" ? "Uploading live frame" : "Uploading frame");
     const presigned = await getPresignedUrl({
       deviceId: "web-simulator",
       timestamp: new Date().toISOString(),
     });
     await uploadToS3(presigned.upload_url, blob);
-    setUploadedKey(presigned.s3_key);
     setStatus("processing");
-    setMessage("Waiting for Rekognition result");
-    window.setTimeout(() => setStatus("result"), 5000);
+    setMessage(mode === "live" ? "Live detection running" : "Waiting for Rekognition result");
+    if (mode === "manual") {
+      window.setTimeout(() => setStatus("result"), 5000);
+    }
+    return presigned.s3_key;
   }
 
-  const latestResult = data?.events.find((event) =>
-    uploadedKey ? event.rawImageKey?.includes(uploadedKey) : false,
-  );
+  function trackUploadedKey(key: string) {
+    setUploadedKeys((keys) => [key, ...keys].slice(0, 20));
+  }
+
+  const latestResult = data?.events.find((event) => {
+    const rawKey = event.rawImageKey || "";
+    return uploadedKeys.some((key) => rawKey.includes(key));
+  });
 
   return (
     <>
@@ -134,16 +223,22 @@ export default function SimulatePage() {
           <div className="card-header">
             <div>
               <div className="card-title">Webcam</div>
-              <div className="card-subtitle">Capture a test frame from this browser</div>
+              <div className="card-subtitle">Run continuous Rekognition checks from this browser</div>
             </div>
           </div>
           <video ref={videoRef} autoPlay className="webcam-preview" muted playsInline />
           <canvas ref={canvasRef} style={{ display: "none" }} />
-          <div style={{ display: "flex", gap: "12px", marginTop: "16px" }}>
+          <div style={{ display: "flex", gap: "12px", marginTop: "16px", flexWrap: "wrap" }}>
             <button className="btn btn-outline" onClick={startCamera}>
               Start Camera
             </button>
-            <button className="btn btn-primary" onClick={captureFrame} disabled={!streamRef.current}>
+            <button className="btn btn-primary" onClick={startLiveDetection} disabled={liveMode}>
+              Start Live Detection
+            </button>
+            <button className="btn btn-outline" onClick={() => stopLiveDetection()} disabled={!liveMode}>
+              Stop Live
+            </button>
+            <button className="btn btn-outline" onClick={captureFrame} disabled={!cameraReady || liveMode}>
               Capture
             </button>
             <button className="btn btn-outline" onClick={() => stopCamera()}>
@@ -151,6 +246,23 @@ export default function SimulatePage() {
             </button>
           </div>
           <div className={`pipeline-status ${status}`}>{message || status}</div>
+          {latestResult && (
+            <div className="result-box">
+              <div className="result-box-header">
+                <span className={`event-status ${latestResult.status.replace("_", "-")}`}>
+                  {statusLabel(latestResult.status)}
+                </span>
+                <span>{new Date(latestResult.timestamp).toLocaleString()}</span>
+              </div>
+              <div className="result-box-details">
+                {resultPersonLabel(latestResult)} · {latestResult.faceCount} face
+                {latestResult.faceCount === 1 ? "" : "s"} ·{" "}
+                {latestResult.confidence > 0
+                  ? `${latestResult.confidence.toFixed(1)}% confidence`
+                  : "no match confidence"}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="card">
@@ -167,8 +279,16 @@ export default function SimulatePage() {
           <div className={`pipeline-status ${status}`}>{message || status}</div>
           {latestResult && (
             <div className="result-box">
-              {latestResult.status} · {latestResult.deviceId} ·{" "}
-              {new Date(latestResult.timestamp).toLocaleString()}
+              <div className="result-box-header">
+                <span className={`event-status ${latestResult.status.replace("_", "-")}`}>
+                  {statusLabel(latestResult.status)}
+                </span>
+                <span>{latestResult.deviceId}</span>
+              </div>
+              <div className="result-box-details">
+                {resultPersonLabel(latestResult)} ·{" "}
+                {new Date(latestResult.timestamp).toLocaleString()}
+              </div>
             </div>
           )}
         </div>
@@ -190,4 +310,21 @@ function cameraErrorMessage(err: unknown) {
     }
   }
   return err instanceof Error ? err.message : "Camera could not be started";
+}
+
+function statusLabel(status: DetectionStatus) {
+  if (status === "no_face") {
+    return "No Face";
+  }
+  return status === "known" ? "Known" : "Unknown";
+}
+
+function resultPersonLabel(event: DetectionEvent) {
+  if (event.status === "known") {
+    return event.personId;
+  }
+  if (event.status === "no_face") {
+    return "No face detected";
+  }
+  return "Unknown person";
 }

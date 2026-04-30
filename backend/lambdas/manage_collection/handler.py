@@ -100,6 +100,8 @@ def _index_face(event):
         return _response(400, {"error": "Missing personId"})
 
     try:
+        _ensure_collection()
+
         if s3_key:
             # Index from S3
             response = rekognition_client.index_faces(
@@ -151,6 +153,15 @@ def _index_face(event):
         return _response(500, {"error": str(e)})
 
 
+def _ensure_collection():
+    """Create the Rekognition collection if it does not already exist."""
+    try:
+        rekognition_client.describe_collection(CollectionId=COLLECTION_ID)
+    except rekognition_client.exceptions.ResourceNotFoundException:
+        rekognition_client.create_collection(CollectionId=COLLECTION_ID)
+        logger.info("Collection created on demand: %s", COLLECTION_ID)
+
+
 def _delete_face(event):
     """
     Delete a face from the collection.
@@ -170,6 +181,8 @@ def _delete_face(event):
         logger.info("Face deleted: %s", face_id)
         return _response(200, {"message": f"Face '{face_id}' deleted"})
     except ClientError as e:
+        if e.response["Error"]["Code"] == "ResourceNotFoundException":
+            return _response(200, {"message": "Collection does not exist; nothing to delete"})
         logger.error("Delete face error: %s", e)
         return _response(500, {"error": str(e)})
 
@@ -210,8 +223,11 @@ def _list_faces():
     except ClientError as e:
         error_code = e.response["Error"]["Code"]
         if error_code == "ResourceNotFoundException":
-            return _response(404, {
-                "error": f"Collection '{COLLECTION_ID}' not found. Create it first."
+            return _response(200, {
+                "collection_id": COLLECTION_ID,
+                "collection_exists": False,
+                "face_count": 0,
+                "faces": [],
             })
         logger.error("List faces error: %s", e)
         return _response(500, {"error": str(e)})

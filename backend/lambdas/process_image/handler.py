@@ -20,10 +20,7 @@ from decimal import Decimal
 import boto3
 from botocore.exceptions import ClientError
 
-from rekognition_service import get_face_match_result
-from thumbnail_service import generate_and_upload_thumbnail
 from notification_rules import should_notify, build_notification_message
-from telegram_notify import send_telegram_message
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -86,6 +83,10 @@ def _process_record(sqs_record: dict):
         if not image_bytes:
             logger.error("Failed to download image: %s/%s", bucket, key)
             return
+
+        from rekognition_service import get_face_match_result
+        from thumbnail_service import generate_and_upload_thumbnail
+        from telegram_notify import send_telegram_message
 
         # Step 2: Rekognition – detect and match faces
         result = get_face_match_result(image_bytes, COLLECTION_ID)

@@ -6,7 +6,7 @@ const stats = [
     value: "1,247",
     change: "+12% vs last week",
     changeType: "positive",
-    icon: "🔍",
+    icon: "DT",
     color: "blue",
   },
   {
@@ -14,7 +14,7 @@ const stats = [
     value: "23",
     change: "2 new this month",
     changeType: "positive",
-    icon: "👤",
+    icon: "ID",
     color: "green",
   },
   {
@@ -22,7 +22,7 @@ const stats = [
     value: "8",
     change: "-5% vs last week",
     changeType: "positive",
-    icon: "🚨",
+    icon: "AL",
     color: "red",
   },
   {
@@ -30,7 +30,7 @@ const stats = [
     value: "4/5",
     change: "1 offline",
     changeType: "negative",
-    icon: "📷",
+    icon: "CM",
     color: "cyan",
   },
 ];

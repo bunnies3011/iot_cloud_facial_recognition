@@ -1,16 +1,12 @@
 """
 Notification Rules
 Determines whether a detection event should trigger a notification.
-Implements cooldown logic to prevent notification spam.
+Implements presence-transition logic and cooldown to prevent notification spam.
 """
 
 import os
 import time
 import logging
-from datetime import datetime, timezone
-
-import boto3
-from boto3.dynamodb.conditions import Key
 
 logger = logging.getLogger()
 
@@ -26,14 +22,18 @@ def should_notify(
     confidence: float,
     person_id: str | None = None,
     confidence_threshold: float = 90.0,
+    previous_has_person: bool | None = None,
+    current_has_person: bool | None = None,
 ) -> tuple[bool, str]:
     """
     Determine if a notification should be sent.
 
     Rules:
-        1. Unknown person detected → NOTIFY
-        2. Known person with low confidence (< threshold) → NOTIFY
-        3. Cooldown: skip if last notification for this device was too recent
+        1. Person-present → no-person transition → NOTIFY
+        2. No-person → person-present transition → NOTIFY
+        3. Person-present → person-present transition → no notification
+        4. No-person → no-person transition → no notification
+        5. Cooldown: skip if last same-transition notification was too recent
 
     Args:
         device_id: Camera device ID.
@@ -41,33 +41,55 @@ def should_notify(
         confidence: Match confidence (0-100).
         person_id: Matched person ID (if known).
         confidence_threshold: Minimum confidence for "known" to skip notification.
+        previous_has_person: Whether the previous event for this device had any face.
+        current_has_person: Whether the current event has any face.
 
     Returns:
         Tuple of (should_notify: bool, reason: str).
     """
-    # No face detected → no notification
-    if status == "no_face":
-        return False, "No face detected"
+    del confidence_threshold
 
+    if current_has_person is None:
+        current_has_person = status != "no_face"
+
+    if previous_has_person is None:
+        return False, "No previous presence state"
+
+    if not previous_has_person and current_has_person:
+        return _notify_with_cooldown(
+            device_id=device_id,
+            transition="person_appeared",
+            success_reason=f"Person detected ({status})",
+        )
+
+    if previous_has_person and current_has_person:
+        return False, "Person still present"
+
+    if not previous_has_person and not current_has_person:
+        return False, "No person still detected"
+
+    return _notify_with_cooldown(
+        device_id=device_id,
+        transition="person_left",
+        success_reason="Person no longer detected",
+    )
+
+
+def _notify_with_cooldown(
+    device_id: str,
+    transition: str,
+    success_reason: str,
+) -> tuple[bool, str]:
     # Check cooldown
     now = time.time()
-    last_time = _last_notification_time.get(device_id, 0)
+    cooldown_key = f"{device_id}:{transition}"
+    last_time = _last_notification_time.get(cooldown_key, 0)
     if now - last_time < COOLDOWN_SECONDS:
         remaining = int(COOLDOWN_SECONDS - (now - last_time))
         return False, f"Cooldown active ({remaining}s remaining)"
 
-    # Unknown person → always notify
-    if status == "unknown":
-        _last_notification_time[device_id] = now
-        return True, "Unknown person detected"
-
-    # Known person with low confidence → notify
-    if status == "known" and confidence < confidence_threshold:
-        _last_notification_time[device_id] = now
-        return True, f"Low confidence match ({confidence:.1f}% < {confidence_threshold}%)"
-
-    # Known person with high confidence → no notification
-    return False, f"Known person '{person_id}' (confidence: {confidence:.1f}%)"
+    _last_notification_time[cooldown_key] = now
+    return True, success_reason
 
 
 def build_notification_message(

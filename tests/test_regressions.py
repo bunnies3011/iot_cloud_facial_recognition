@@ -150,6 +150,57 @@ class RegressionTests(unittest.TestCase):
         self.assertGreater(item["ttl"], 0)
         self.assertIsInstance(item["confidence"], Decimal)
 
+    def test_notification_on_presence_transitions(self):
+        os.environ["NOTIFICATION_COOLDOWN_SECONDS"] = "60"
+        module = load_module(
+            "notification_rules_presence_test",
+            ROOT / "backend/lambdas/process_image/notification_rules.py",
+        )
+        module._last_notification_time.clear()
+
+        self.assertEqual(
+            (True, "Person no longer detected"),
+            module.should_notify(
+                device_id="cam-01",
+                status="no_face",
+                confidence=0,
+                previous_has_person=True,
+                current_has_person=False,
+            ),
+        )
+
+        module._last_notification_time.clear()
+        should_notify, reason = module.should_notify(
+            device_id="cam-01",
+            status="known",
+            confidence=99,
+            previous_has_person=True,
+            current_has_person=True,
+        )
+        self.assertFalse(should_notify)
+        self.assertEqual(reason, "Person still present")
+
+        should_notify, reason = module.should_notify(
+            device_id="cam-01",
+            status="unknown",
+            confidence=0,
+            previous_has_person=False,
+            current_has_person=True,
+        )
+        self.assertTrue(should_notify)
+        self.assertEqual(reason, "Person detected (unknown)")
+
+        module._last_notification_time.clear()
+        should_notify, reason = module.should_notify(
+            device_id="cam-01",
+            status="known",
+            confidence=99,
+            previous_has_person=False,
+            current_has_person=True,
+        )
+        self.assertTrue(should_notify)
+        self.assertEqual(reason, "Person detected (known)")
+
 
 if __name__ == "__main__":
     unittest.main()

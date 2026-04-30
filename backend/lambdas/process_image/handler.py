@@ -121,6 +121,9 @@ def _process_record(sqs_record: dict):
             person_id = result["best_match"]["external_image_id"]
             confidence = result["best_match"]["similarity"]
 
+        previous_has_person = _get_latest_presence(device_id)
+        current_has_person = result["face_count"] > 0
+
         detection_item = _save_detection(
             device_id=device_id,
             timestamp=timestamp,
@@ -145,6 +148,8 @@ def _process_record(sqs_record: dict):
             status=result["status"],
             confidence=confidence,
             person_id=person_id,
+            previous_has_person=previous_has_person,
+            current_has_person=current_has_person,
         )
 
         if notify:
@@ -158,16 +163,17 @@ def _process_record(sqs_record: dict):
                 thumbnail_key=thumbnail_key,
             )
 
-            if result["status"] == "unknown":
-                send_telegram_message(message["text_message"])
+            send_telegram_message(message["text_message"])
 
             if NOTIFICATION_TOPIC_ARN:
                 _publish_notification(message)
 
         logger.info(
-            "✅ Processing complete: device=%s, status=%s, notify=%s (%s)",
+            "✅ Processing complete: device=%s, status=%s, previous_has_person=%s, current_has_person=%s, notify=%s (%s)",
             device_id,
             result["status"],
+            previous_has_person,
+            current_has_person,
             notify,
             reason,
         )
@@ -209,6 +215,7 @@ def _save_detection(
         "dateKey": date_key,
         "confidence": Decimal(str(round(confidence, 2))),
         "faceCount": face_count,
+        "hasPerson": face_count > 0,
         "rawImageKey": raw_image_key,
         "ttl": int(
             (datetime.now(timezone.utc) + timedelta(days=DETECTION_TTL_DAYS)).timestamp()
@@ -225,6 +232,39 @@ def _save_detection(
     except ClientError as e:
         logger.error("DynamoDB put_item error: %s", e)
         raise
+
+
+def _get_latest_presence(device_id: str) -> bool | None:
+    """Return whether the latest saved event for this device had any person."""
+    table = dynamodb.Table(DETECTIONS_TABLE)
+
+    try:
+        response = table.query(
+            KeyConditionExpression=boto3.dynamodb.conditions.Key("deviceId").eq(device_id),
+            ScanIndexForward=False,
+            Limit=1,
+        )
+    except ClientError as e:
+        logger.warning("Failed to query latest detection presence: %s", e)
+        return None
+
+    items = response.get("Items", [])
+    if not items:
+        return None
+
+    return _item_has_person(items[0])
+
+
+def _item_has_person(item: dict) -> bool:
+    if "hasPerson" in item:
+        return bool(item["hasPerson"])
+
+    try:
+        face_count = int(item.get("faceCount", 0))
+    except (TypeError, ValueError):
+        face_count = 0
+
+    return item.get("status") != "no_face" and face_count > 0
 
 
 def _update_device_status(device_id: str, timestamp: str):

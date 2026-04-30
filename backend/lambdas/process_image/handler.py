@@ -37,6 +37,11 @@ DEVICE_STATUS_TABLE = os.environ.get("DEVICE_STATUS_TABLE")
 NOTIFICATION_TOPIC_ARN = os.environ.get("NOTIFICATION_TOPIC_ARN")
 COLLECTION_ID = os.environ.get("REKOGNITION_COLLECTION_ID", "home-security-faces")
 DETECTION_TTL_DAYS = int(os.environ.get("DETECTION_TTL_DAYS", "90"))
+SYSTEM_UPLOAD_DEVICE_IDS = {
+    value.strip()
+    for value in os.environ.get("SYSTEM_UPLOAD_DEVICE_IDS", "web-persons,known-persons").split(",")
+    if value.strip()
+}
 
 
 def lambda_handler(event, context):
@@ -76,6 +81,15 @@ def _process_record(sqs_record: dict):
         # Key format: {deviceId}/{yyyy}/{mm}/{dd}/{timestamp}.jpg
         parts = key.split("/")
         device_id = parts[0] if parts else "unknown"
+        if _is_system_upload(device_id):
+            logger.info(
+                "Skipping system upload: device=%s, key=s3://%s/%s",
+                device_id,
+                bucket,
+                key,
+            )
+            continue
+
         timestamp = datetime.now(timezone.utc).isoformat()
 
         # Step 1: Download image from S3
@@ -270,6 +284,7 @@ def query_events_handler(event, context):
         device_id = params.get("deviceId")
         date_key = params.get("date")
         limit = int(params.get("limit", "50"))
+        query_limit = min(max(limit, 1) * 3, 200)
 
         table = dynamodb.Table(DETECTIONS_TABLE)
 
@@ -278,7 +293,7 @@ def query_events_handler(event, context):
             response = table.query(
                 KeyConditionExpression=boto3.dynamodb.conditions.Key("deviceId").eq(device_id),
                 ScanIndexForward=False,
-                Limit=limit,
+                Limit=query_limit,
             )
         elif date_key:
             # Query by date (GSI)
@@ -286,7 +301,7 @@ def query_events_handler(event, context):
                 IndexName="GSI-ByTime",
                 KeyConditionExpression=boto3.dynamodb.conditions.Key("dateKey").eq(date_key),
                 ScanIndexForward=False,
-                Limit=limit,
+                Limit=query_limit,
             )
         else:
             # Default: today's events
@@ -295,10 +310,11 @@ def query_events_handler(event, context):
                 IndexName="GSI-ByTime",
                 KeyConditionExpression=boto3.dynamodb.conditions.Key("dateKey").eq(today),
                 ScanIndexForward=False,
-                Limit=limit,
+                Limit=query_limit,
             )
 
         items = json.loads(json.dumps(response.get("Items", []), default=_json_default))
+        items = _visible_detection_items(items)[:limit]
 
         return {
             "statusCode": 200,
@@ -327,3 +343,15 @@ def _json_default(value):
             return int(value)
         return float(value)
     return str(value)
+
+
+def _is_system_upload(device_id: str) -> bool:
+    return device_id in SYSTEM_UPLOAD_DEVICE_IDS
+
+
+def _visible_detection_items(items: list[dict]) -> list[dict]:
+    return [
+        item
+        for item in items
+        if not _is_system_upload(str(item.get("deviceId", "")))
+    ]

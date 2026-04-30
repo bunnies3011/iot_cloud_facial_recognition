@@ -95,7 +95,7 @@ function FilterButton({
 }
 
 function EventRow({ event }: { event: DetectionEvent }) {
-  const image = s3ImageUrl(event.thumbnailKey);
+  const image = s3ImageUrl(event.thumbnailKey || event.rawImageKey);
   const statusClass = event.status.replace("_", "-");
 
   return (

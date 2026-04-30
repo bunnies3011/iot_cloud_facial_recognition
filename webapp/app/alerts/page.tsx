@@ -1,12 +1,23 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { usePolling } from "@/lib/api";
+import { s3ImageUrl, usePolling } from "@/lib/api";
 import type { DetectionEvent, DeviceStatus } from "@/lib/types";
 
 type EventsResponse = { events: DetectionEvent[] };
 type DevicesResponse = { devices: DeviceStatus[] };
 type AlertFilter = "all" | "stranger" | "degraded" | "offline" | "recovery";
+type AlertSeverity = "danger" | "warning";
+type AlertItem = {
+  id: string;
+  type: AlertFilter;
+  severity: AlertSeverity;
+  title: string;
+  detail: string;
+  imageUrl?: string;
+  confidence?: number;
+  faceCount?: number;
+};
 
 export default function AlertsPage() {
   const [filter, setFilter] = useState<AlertFilter>("all");
@@ -14,17 +25,20 @@ export default function AlertsPage() {
   const devices = usePolling<DevicesResponse>("/api/devices", 5000);
 
   const alerts = useMemo(() => {
-    const detectionAlerts = (events.data?.events ?? [])
+    const detectionAlerts: AlertItem[] = (events.data?.events ?? [])
       .filter((event) => event.status === "unknown")
       .map((event) => ({
         id: `${event.deviceId}-${event.timestamp}`,
-        type: "stranger" as AlertFilter,
+        type: "stranger",
         severity: "danger",
         title: "Stranger detected",
         detail: `${event.deviceId} · ${new Date(event.timestamp).toLocaleString()}`,
+        imageUrl: s3ImageUrl(event.thumbnailKey || event.rawImageKey),
+        confidence: event.confidence,
+        faceCount: event.faceCount,
       }));
 
-    const deviceAlerts = (devices.data?.devices ?? [])
+    const deviceAlerts: AlertItem[] = (devices.data?.devices ?? [])
       .filter((device) => getState(device) !== "online")
       .map((device) => ({
         id: device.deviceId,
@@ -66,11 +80,27 @@ export default function AlertsPage() {
           {alerts.map((alert) => (
             <div className="timeline-item" key={alert.id}>
               <div className={`timeline-dot ${alert.severity}`} />
-              <div className="card-title">{alert.title}</div>
-              <div className="card-subtitle">{alert.detail}</div>
-              <span className="badge badge-success" style={{ marginTop: "8px" }}>
-                Telegram non-blocking
-              </span>
+              <div className="alert-timeline-content">
+                {alert.imageUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={alert.imageUrl} alt="" className="alert-image" />
+                ) : null}
+                <div className="alert-timeline-body">
+                  <div className="card-title">{alert.title}</div>
+                  <div className="card-subtitle">{alert.detail}</div>
+                  {alert.faceCount !== undefined && (
+                    <div className="alert-meta">
+                      {alert.faceCount} face{alert.faceCount === 1 ? "" : "s"}
+                      {(alert.confidence ?? 0) > 0
+                        ? ` · ${alert.confidence?.toFixed(1)}%`
+                        : ""}
+                    </div>
+                  )}
+                  <span className="badge badge-success" style={{ marginTop: "8px" }}>
+                    Telegram non-blocking
+                  </span>
+                </div>
+              </div>
             </div>
           ))}
           {!alerts.length && (

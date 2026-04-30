@@ -1,25 +1,65 @@
 "use client";
 
-import { ChangeEvent, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { getPresignedUrl, uploadToS3, usePolling } from "@/lib/api";
 import type { DetectionEvent } from "@/lib/types";
 
 type EventsResponse = { events: DetectionEvent[] };
-type SimStatus = "idle" | "capturing" | "uploading" | "processing" | "result";
+type SimStatus = "idle" | "capturing" | "uploading" | "processing" | "result" | "error";
 
 export default function SimulatePage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const [status, setStatus] = useState<SimStatus>("idle");
   const [message, setMessage] = useState("");
   const [uploadedKey, setUploadedKey] = useState<string | null>(null);
   const { data } = usePolling<EventsResponse>("/api/detections?limit=10", 3000);
 
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
   async function startCamera() {
     setStatus("capturing");
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    setMessage("Requesting camera permission");
+    try {
+      if (!window.isSecureContext) {
+        throw new Error("Camera requires HTTPS or localhost");
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("This browser does not support camera capture");
+      }
+
+      stopCamera(false);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user" },
+        audio: false,
+      });
+      streamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+      setMessage("Camera is ready");
+    } catch (err) {
+      setStatus("error");
+      setMessage(cameraErrorMessage(err));
+    }
+  }
+
+  function stopCamera(updateStatus = true) {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
     if (videoRef.current) {
-      videoRef.current.srcObject = stream;
+      videoRef.current.srcObject = null;
+    }
+    if (updateStatus) {
+      setStatus("idle");
+      setMessage("Camera stopped");
     }
   }
 
@@ -27,6 +67,11 @@ export default function SimulatePage() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) {
+      return;
+    }
+    if (!streamRef.current || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      setStatus("error");
+      setMessage("Start the camera before capturing");
       return;
     }
 
@@ -38,14 +83,24 @@ export default function SimulatePage() {
       canvas.toBlob(resolve, "image/jpeg", 0.9),
     );
     if (blob) {
-      await uploadBlob(blob);
+      try {
+        await uploadBlob(blob);
+      } catch (err) {
+        setStatus("error");
+        setMessage(err instanceof Error ? err.message : "Upload failed");
+      }
     }
   }
 
   async function handleFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (file) {
-      await uploadBlob(file);
+      try {
+        await uploadBlob(file);
+      } catch (err) {
+        setStatus("error");
+        setMessage(err instanceof Error ? err.message : "Upload failed");
+      }
     }
   }
 
@@ -88,10 +143,14 @@ export default function SimulatePage() {
             <button className="btn btn-outline" onClick={startCamera}>
               Start Camera
             </button>
-            <button className="btn btn-primary" onClick={captureFrame}>
+            <button className="btn btn-primary" onClick={captureFrame} disabled={!streamRef.current}>
               Capture
             </button>
+            <button className="btn btn-outline" onClick={() => stopCamera()}>
+              Stop
+            </button>
           </div>
+          <div className={`pipeline-status ${status}`}>{message || status}</div>
         </div>
 
         <div className="card">
@@ -116,4 +175,19 @@ export default function SimulatePage() {
       </div>
     </>
   );
+}
+
+function cameraErrorMessage(err: unknown) {
+  if (err instanceof DOMException) {
+    if (err.name === "NotAllowedError") {
+      return "Camera permission was blocked";
+    }
+    if (err.name === "NotFoundError") {
+      return "No camera device was found";
+    }
+    if (err.name === "NotReadableError") {
+      return "Camera is already in use by another app";
+    }
+  }
+  return err instanceof Error ? err.message : "Camera could not be started";
 }

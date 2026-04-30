@@ -100,23 +100,9 @@ def _index_face(event):
         return _response(400, {"error": "Missing personId"})
 
     try:
-        _ensure_collection()
-
         if s3_key:
             # Index from S3
-            response = rekognition_client.index_faces(
-                CollectionId=COLLECTION_ID,
-                Image={
-                    "S3Object": {
-                        "Bucket": RAW_BUCKET,
-                        "Name": s3_key,
-                    }
-                },
-                ExternalImageId=person_id,
-                MaxFaces=1,
-                QualityFilter="AUTO",
-                DetectionAttributes=["ALL"],
-            )
+            response = _index_face_from_s3(person_id, s3_key)
         else:
             return _response(400, {"error": "Missing s3Key"})
 
@@ -151,6 +137,32 @@ def _index_face(event):
     except ClientError as e:
         logger.error("Index face error: %s", e)
         return _response(500, {"error": str(e)})
+
+
+def _index_face_from_s3(person_id: str, s3_key: str) -> dict:
+    """Index a face, creating the collection on demand if needed."""
+    try:
+        return _call_index_faces(person_id, s3_key)
+    except rekognition_client.exceptions.ResourceNotFoundException:
+        rekognition_client.create_collection(CollectionId=COLLECTION_ID)
+        logger.info("Collection created on demand: %s", COLLECTION_ID)
+        return _call_index_faces(person_id, s3_key)
+
+
+def _call_index_faces(person_id: str, s3_key: str) -> dict:
+    return rekognition_client.index_faces(
+        CollectionId=COLLECTION_ID,
+        Image={
+            "S3Object": {
+                "Bucket": RAW_BUCKET,
+                "Name": s3_key,
+            }
+        },
+        ExternalImageId=person_id,
+        MaxFaces=1,
+        QualityFilter="AUTO",
+        DetectionAttributes=["ALL"],
+    )
 
 
 def _ensure_collection():

@@ -254,6 +254,8 @@ Resources:
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref RawImagesBucket
+        - S3ReadPolicy:
+            BucketName: !Ref ThumbnailsBucket
       Events:
         PostPresignedUrl:
           Type: Api
@@ -261,6 +263,12 @@ Resources:
             RestApiId: !Ref SecurityApi
             Path: /api/presigned-url
             Method: POST
+        GetImageUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SecurityApi
+            Path: /api/image-url
+            Method: GET
 
   # --- Process Image ---
   ProcessImageFunction:
@@ -275,6 +283,7 @@ Resources:
         Variables:
           NOTIFICATION_COOLDOWN_SECONDS: !Ref NotificationCooldownSeconds
           DETECTION_TTL_DAYS: !Ref DetectionTtlDays
+          SYSTEM_UPLOAD_DEVICE_IDS: "web-persons,known-persons"
           TELEGRAM_BOT_TOKEN: !Ref TelegramBotToken
           TELEGRAM_CHAT_ID: !Ref TelegramChatId
       Policies:
@@ -319,6 +328,7 @@ Resources:
               Action:
                 - rekognition:CreateCollection
                 - rekognition:DeleteCollection
+                - rekognition:DescribeCollection
                 - rekognition:IndexFaces
                 - rekognition:DeleteFaces
                 - rekognition:ListFaces
@@ -430,6 +440,9 @@ Resources:
       FunctionName: !Sub home-security-query-events-${Environment}
       CodeUri: ../backend/lambdas/process_image/
       Handler: handler.query_events_handler
+      Environment:
+        Variables:
+          SYSTEM_UPLOAD_DEVICE_IDS: "web-persons,known-persons"
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref DetectionsTable

@@ -57,7 +57,7 @@ export async function getPresignedUrl(payload: {
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
-    throw new Error(`Upload URL request failed with ${response.status}`);
+    throw new Error(await responseError(response, "Upload URL request failed"));
   }
   return response.json() as Promise<{
     upload_url: string;
@@ -70,7 +70,7 @@ export async function uploadToS3(uploadUrl: string, file: Blob) {
   const response = await fetch(uploadUrl, {
     method: "PUT",
     body: file,
-    headers: { "Content-Type": file.type || "image/jpeg" },
+    headers: { "Content-Type": "image/jpeg" },
   });
   if (!response.ok) {
     throw new Error(`S3 upload failed with ${response.status}`);
@@ -88,9 +88,14 @@ export async function registerFace(payload: {
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
-    throw new Error(`Register face failed with ${response.status}`);
+    throw new Error(await responseError(response, "Register face failed"));
   }
   return response.json();
+}
+
+async function responseError(response: Response, fallback: string) {
+  const body = await response.json().catch(() => null) as { error?: string } | null;
+  return body?.error || `${fallback} with ${response.status}`;
 }
 
 export function s3ImageUrl(key?: string) {
@@ -98,13 +103,5 @@ export function s3ImageUrl(key?: string) {
     return "";
   }
 
-  const publicBase = process.env.NEXT_PUBLIC_S3_BUCKET_URL;
-  if (!publicBase) {
-    return "";
-  }
-
-  const cleanKey = key.startsWith("s3://")
-    ? key.split("/").slice(3).join("/")
-    : key;
-  return `${publicBase.replace(/\/$/, "")}/${cleanKey}`;
+  return `/api/image-url?key=${encodeURIComponent(key)}`;
 }

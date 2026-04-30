@@ -844,6 +844,33 @@ tr:hover td {
   background: var(--accent-amber);
 }
 
+.alert-timeline-content {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.alert-timeline-body {
+  min-width: 0;
+}
+
+.alert-image {
+  display: block;
+  width: 88px;
+  height: 88px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+  object-fit: cover;
+}
+
+.alert-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
 .error-banner,
 .error-box {
   border: 1px solid #efc0bd;
@@ -991,6 +1018,12 @@ tr:hover td {
   border-color: #b8dcc8;
   background: #e9f7f0;
   color: var(--accent-green-dark);
+}
+
+.pipeline-status.error {
+  border-color: #efc0bd;
+  background: #fff0ef;
+  color: var(--accent-red-dark);
 }
 
 .detection-card {

@@ -146,7 +146,7 @@ function StatCard(props: { color: string; icon: string; label: string; value: st
 }
 
 function EventRow({ event }: { event: DetectionEvent }) {
-  const image = s3ImageUrl(event.thumbnailKey);
+  const image = s3ImageUrl(event.thumbnailKey || event.rawImageKey);
   return (
     <div className="event-item">
       {image ? (

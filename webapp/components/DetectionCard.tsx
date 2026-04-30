@@ -4,7 +4,7 @@ import { s3ImageUrl } from "@/lib/api";
 import type { DetectionEvent } from "@/lib/types";
 
 export default function DetectionCard({ event }: { event: DetectionEvent }) {
-  const image = s3ImageUrl(event.thumbnailKey);
+  const image = s3ImageUrl(event.thumbnailKey || event.rawImageKey);
   const statusClass = event.status.replace("_", "-");
 
   return (

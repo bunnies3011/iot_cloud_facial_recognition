@@ -18,7 +18,7 @@ A complete home security system with AI-powered face recognition, built on AWS s
 | **Queue** | Amazon SQS (decoupled processing) |
 | **Notifications** | Direct Telegram fast path + Amazon SNS → Telegram / Email |
 | **Monitoring** | Amazon EventBridge (scheduled health checks) |
-| **Web App** | Next.js (TypeScript) |
+| **Web App** | Next.js (TypeScript) deployed on Vercel |
 | **Infrastructure** | AWS SAM (CloudFormation) |
 
 ## Project Structure
@@ -76,7 +76,8 @@ iot_cloud_home_security/
 │   ├── next.config.ts                     # Next.js configuration
 │   ├── tsconfig.json                      # TypeScript configuration
 │   ├── eslint.config.mjs                  # ESLint configuration
-│   ├── amplify.yml                        # AWS Amplify SSR build configuration
+│   ├── .vercelignore                      # Files excluded from Vercel uploads
+│   ├── amplify.yml                        # Optional AWS Amplify SSR build configuration
 │   ├── app/                               # Next.js App Router
 │   │   ├── layout.tsx                     # Root shell and navigation layout
 │   │   ├── globals.css                    # Dashboard styling
@@ -135,24 +136,26 @@ The project is split into three runtime pieces:
 
 1. **AWS backend** - SAM deploys API Gateway, Lambda, S3, SQS, DynamoDB, Rekognition access, SNS, and EventBridge.
 2. **Edge gateway** - the Raspberry Pi reads the RTSP camera, detects motion/faces locally, requests an upload URL, and uploads frames to S3.
-3. **Web dashboard** - the Next.js app reads events, devices, faces, and upload URLs through its own server-side API proxy so the AWS API key is not exposed in the browser.
+3. **Web dashboard** - the Next.js app is deployed on Vercel. It reads events, devices, faces, and upload URLs through its own server-side API proxy so the AWS API key is not exposed in the browser.
 
 Normal flow:
 
 1. Deploy the AWS stack.
-2. Copy stack outputs into the edge and web dashboard environment files.
-3. Start the dashboard locally or deploy it to Amplify.
-4. Start the Pi gateway, or use the web simulator to upload test images.
-5. Check detections, device status, known persons, and alerts from the dashboard.
+2. Add stack outputs and the API key to Vercel environment variables for the dashboard.
+3. Deploy the dashboard to Vercel, or rely on Vercel Git integration for auto-deploy after each push.
+4. Configure the edge gateway with the same API endpoint and API key.
+5. Start the Pi gateway, or use the Vercel dashboard simulator to upload test images.
+6. Check detections, device status, known persons, and alerts from the dashboard.
 
 ## Quick Start
 
 ### Prerequisites
 - AWS Account with CLI configured
 - Python 3.12+
-- Node.js 20.9+ for the Next.js dashboard
+- Node.js 20.9+ for local Next.js dashboard checks
 - AWS SAM CLI
 - uv, if you want to use the locked Python development environment
+- Vercel account and CLI access for hosted dashboard deployment
 
 ### 1. Deploy Infrastructure
 ```bash
@@ -194,7 +197,7 @@ You need:
 
 API Gateway also requires an API key. Find it in the AWS Console under **API Gateway → API Keys**, or list it with the AWS CLI for your deployed API usage plan.
 
-### 2. Configure Web Dashboard
+### 2. Configure Web Dashboard Env
 ```bash
 cd webapp
 npm install
@@ -211,7 +214,53 @@ NEXT_PUBLIC_S3_BUCKET_URL=https://home-security-thumb-dev-your-account-id.s3.reg
 
 `API_ENDPOINT` and `API_KEY` are server-side only. Do not rename them to `NEXT_PUBLIC_*`.
 
-### 3. Check the Dashboard Locally
+For Vercel production, configure the same values in the Vercel project environment variables:
+
+```bash
+cd webapp
+npx --yes vercel@52.2.1 env add API_ENDPOINT production
+npx --yes vercel@52.2.1 env add API_KEY production
+npx --yes vercel@52.2.1 env add NEXT_PUBLIC_S3_BUCKET_URL production
+```
+
+`API_KEY` must stay server-side. `NEXT_PUBLIC_S3_BUCKET_URL` is intentionally public because the browser uses it to render image previews.
+
+### 3. Deploy the Dashboard to Vercel
+Manual production deploy:
+
+```bash
+cd webapp
+npx --yes vercel@52.2.1 deploy --prod --yes
+```
+
+Current production dashboard:
+
+- `https://webapp-phi-vert.vercel.app` - live overview
+- `https://webapp-phi-vert.vercel.app/events` - detection history
+- `https://webapp-phi-vert.vercel.app/devices` - device health
+- `https://webapp-phi-vert.vercel.app/persons` - known-person registration
+- `https://webapp-phi-vert.vercel.app/alerts` - alert view
+- `https://webapp-phi-vert.vercel.app/simulate` - upload webcam/file frames through the real S3 and Lambda pipeline
+
+Quick production API checks:
+
+```bash
+curl https://webapp-phi-vert.vercel.app/api/devices
+curl "https://webapp-phi-vert.vercel.app/api/detections?limit=5"
+```
+
+If Vercel returns `API_ENDPOINT and API_KEY must be configured on the server`, add or update the Vercel environment variables, then redeploy.
+
+To enable GitHub auto-deploy, connect the Vercel project to the repository after the Vercel account has a GitHub login connection:
+
+```bash
+cd webapp
+npx --yes vercel@52.2.1 git connect https://github.com/bunnies3011/iot_cloud_facial_recognition.git
+```
+
+After that, pushes to the connected production branch will trigger Vercel deployments automatically.
+
+### 4. Check the Dashboard Locally
 ```bash
 cd webapp
 npm run dev
@@ -235,26 +284,36 @@ curl "http://localhost:3000/api/detections?limit=5"
 
 If the dashboard returns `API_ENDPOINT and API_KEY must be configured on the server`, check `webapp/.env.local` and restart `npm run dev`.
 
-### 4. Setup Raspberry Pi Gateway
+### 5. Setup Raspberry Pi Gateway
 ```bash
 cd edge
-pip install -r requirements.txt
+uv sync
 export DEVICE_ID=cam-01
 export API_ENDPOINT=https://your-api-id.execute-api.region.amazonaws.com/dev
 export API_KEY=your-api-key
 export CAMERA_SOURCE_TYPE=rtsp
 export RTSP_URL='rtsp://admin:SAFETYCODE@192.168.1.100:554/cam/realmonitor?channel=1&subtype=0'
+uv run main.py
+```
+
+`uv run main.py` only starts the edge capture loop. It does not start or open the web dashboard.
+
+If you are not using uv on the Pi, install the edge requirements and run Python directly:
+
+```bash
+cd edge
+pip install -r requirements.txt
 python main.py
 ```
 
 For systemd setup on the Pi, use `edge/iot-face-client.service` and the detailed guide in `docs/RASPBERRY_PI_SETUP.md`.
 
-### 5. Start Both Local Dashboard and Pi Service
+### 6. Optional Local Helper Script
 ```bash
 PI_HOST=pi@192.168.1.50 ./scripts/start-system.sh
 ```
 
-This starts the remote Pi service over SSH, installs/builds the dashboard if needed, and serves the dashboard at `http://localhost:3000`.
+This starts the remote Pi service over SSH, installs/builds the local dashboard if needed, and serves the local dashboard at `http://localhost:3000`. It is optional when the dashboard is already deployed on Vercel.
 
 ## Data Flow
 
@@ -304,7 +363,9 @@ Dashboard pages:
 | `/alerts` | Alert-focused view |
 | `/simulate` | Browser webcam/file upload into the same S3 processing path |
 
-For AWS Amplify SSR deployment, use `webapp/amplify.yml` and configure `API_ENDPOINT`, `API_KEY`, and `NEXT_PUBLIC_S3_BUCKET_URL` in Amplify environment variables.
+Production is deployed on Vercel. Configure `API_ENDPOINT`, `API_KEY`, and `NEXT_PUBLIC_S3_BUCKET_URL` in Vercel project environment variables, then redeploy.
+
+For optional AWS Amplify SSR deployment, use `webapp/amplify.yml` and configure the same environment variables in Amplify.
 
 ## Configuration Templates
 
@@ -314,7 +375,20 @@ For AWS Amplify SSR deployment, use `webapp/amplify.yml` and configure `API_ENDP
 
 ## Operations
 
-Start the local dashboard and optionally start the Pi service over SSH:
+Start the edge gateway on the Pi:
+
+```bash
+cd edge
+uv run main.py
+```
+
+The hosted dashboard is available at:
+
+```text
+https://webapp-phi-vert.vercel.app
+```
+
+Optionally start the local dashboard and Pi service over SSH:
 
 ```bash
 PI_HOST=pi@192.168.1.50 ./scripts/start-system.sh

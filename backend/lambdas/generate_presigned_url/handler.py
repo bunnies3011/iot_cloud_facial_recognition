@@ -1,16 +1,18 @@
 """
 Lambda: Generate Pre-signed URL
-Generates a time-limited S3 pre-signed URL for the edge device to upload images.
+Generates time-limited S3 pre-signed URLs for uploading and reading images.
 
 API: POST /api/presigned-url
 Body: { "deviceId": "cam-01", "timestamp": "2024-05-28T10:15:30Z" }
+
+API: GET /api/image-url?key=s3://bucket/path/to/image.jpg
 """
 
 import json
 import os
 import logging
 from datetime import datetime, timezone
-from urllib.parse import quote
+from urllib.parse import unquote, urlparse
 
 import boto3
 from botocore.exceptions import ClientError
@@ -21,10 +23,21 @@ logger.setLevel(logging.INFO)
 s3_client = boto3.client("s3")
 
 RAW_BUCKET = os.environ.get("RAW_BUCKET", "home-security-raw")
+THUMB_BUCKET = os.environ.get("THUMB_BUCKET", "home-security-thumb")
 PRESIGNED_URL_EXPIRY = int(os.environ.get("PRESIGNED_URL_EXPIRY", "300"))
 
 
 def lambda_handler(event, context):
+    method = event.get("httpMethod") or event.get("requestContext", {}).get("http", {}).get("method")
+    if method == "GET":
+        return _handle_image_url(event)
+    if method and method != "POST":
+        return _response(405, {"error": "Method not allowed"})
+
+    return _handle_upload_url(event)
+
+
+def _handle_upload_url(event):
     """
     Generate a pre-signed PUT URL for image upload.
     
@@ -89,6 +102,64 @@ def lambda_handler(event, context):
     except Exception as e:
         logger.exception("Unexpected error: %s", e)
         return _response(500, {"error": "Internal server error"})
+
+
+def _handle_image_url(event):
+    """Generate a pre-signed GET URL for a raw or thumbnail image."""
+    try:
+        query = event.get("queryStringParameters") or {}
+        requested_key = query.get("key")
+        if not requested_key:
+            return _response(400, {"error": "Missing required query parameter: key"})
+
+        bucket, key = _parse_allowed_s3_key(requested_key)
+        if not bucket or not key:
+            return _response(400, {"error": "Image key is not allowed"})
+
+        presigned_url = s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": bucket,
+                "Key": key,
+            },
+            ExpiresIn=PRESIGNED_URL_EXPIRY,
+        )
+
+        logger.info(
+            "Generated image URL: bucket=%s, key=%s, expiry=%ds",
+            bucket,
+            key,
+            PRESIGNED_URL_EXPIRY,
+        )
+
+        return _response(200, {
+            "url": presigned_url,
+            "expires_in": PRESIGNED_URL_EXPIRY,
+        })
+
+    except ClientError as e:
+        logger.error("AWS error generating image URL: %s", e)
+        return _response(500, {"error": "Failed to generate image URL"})
+    except Exception as e:
+        logger.exception("Unexpected error: %s", e)
+        return _response(500, {"error": "Internal server error"})
+
+
+def _parse_allowed_s3_key(value: str) -> tuple[str | None, str | None]:
+    decoded = unquote(value)
+    allowed_buckets = {RAW_BUCKET, THUMB_BUCKET}
+
+    if decoded.startswith("s3://"):
+        parsed = urlparse(decoded)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+    else:
+        bucket = THUMB_BUCKET
+        key = decoded.lstrip("/")
+
+    if bucket not in allowed_buckets or not key or ".." in key.split("/"):
+        return None, None
+    return bucket, key
 
 
 def _response(status_code: int, body: dict) -> dict:

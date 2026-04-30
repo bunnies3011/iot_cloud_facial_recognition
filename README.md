@@ -16,7 +16,7 @@ A complete home security system with AI-powered face recognition, built on AWS s
 | **Database** | Amazon DynamoDB (with GSIs) |
 | **Storage** | Amazon S3 (raw images + thumbnails) |
 | **Queue** | Amazon SQS (decoupled processing) |
-| **Notifications** | Direct Telegram fast path + Amazon SNS → Zalo OA / Telegram / Email |
+| **Notifications** | Direct Telegram fast path + Amazon SNS → Telegram / Email |
 | **Monitoring** | Amazon EventBridge (scheduled health checks) |
 | **Web App** | Next.js (TypeScript) |
 | **Infrastructure** | AWS SAM (CloudFormation) |
@@ -158,8 +158,23 @@ Normal flow:
 ```bash
 cd infrastructure
 sam build
-sam deploy --guided
+cp samconfig.example.toml samconfig.toml
 ```
+
+Edit `infrastructure/samconfig.toml` once and fill in:
+
+- `stack_name`
+- `region`
+- `TelegramBotToken`
+- `TelegramChatId`
+
+Then deploy without answering the guided prompts again:
+
+```bash
+sam deploy
+```
+
+`infrastructure/samconfig.toml` is ignored by git, so keep real tokens there and commit only `samconfig.example.toml`.
 
 After deployment, capture the stack outputs:
 

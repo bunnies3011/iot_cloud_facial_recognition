@@ -1,0 +1,18 @@
+version = 0.1
+
+[default.global.parameters]
+template_file = "template.yaml"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+stack_name = "home-security-dev"
+region = "ap-southeast-1"
+resolve_s3 = true
+s3_prefix = "home-security-dev"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+disable_rollback = false
+parameter_overrides = "Environment=\"dev\" PresignedUrlExpiry=\"300\" DeviceOfflineThresholdMinutes=\"10\" NotificationCooldownSeconds=\"60\" DetectionTtlDays=\"90\" TelegramBotToken=\"123456:replace-me\" TelegramChatId=\"replace-me\""

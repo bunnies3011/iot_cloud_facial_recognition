@@ -64,6 +64,7 @@ Resources:
   # ============================================================
   RawImagesBucket:
     Type: AWS::S3::Bucket
+    DependsOn: ImageProcessingQueuePolicy
     Properties:
       BucketName: !Sub home-security-raw-${Environment}-${AWS::AccountId}
       BucketEncryption:
@@ -136,7 +137,7 @@ Resources:
             Resource: !GetAtt ImageProcessingQueue.Arn
             Condition:
               ArnEquals:
-                aws:SourceArn: !GetAtt RawImagesBucket.Arn
+                aws:SourceArn: !Sub arn:${AWS::Partition}:s3:::home-security-raw-${Environment}-${AWS::AccountId}
 
   # ============================================================
   # DYNAMODB TABLES
@@ -270,7 +271,6 @@ Resources:
       Handler: handler.lambda_handler
       Timeout: 120
       MemorySize: 512
-      ReservedConcurrentExecutions: 5
       Environment:
         Variables:
           NOTIFICATION_COOLDOWN_SECONDS: !Ref NotificationCooldownSeconds
@@ -349,25 +349,6 @@ Resources:
             RestApiId: !Ref SecurityApi
             Path: /api/collection/faces
             Method: GET
-
-  # --- Notify Zalo ---
-  NotifyZaloFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub home-security-notify-zalo-${Environment}
-      CodeUri: ../backend/lambdas/notify_zalo/
-      Handler: handler.lambda_handler
-      Environment:
-        Variables:
-          ZALO_OA_ACCESS_TOKEN: "{{resolve:ssm:/home-security/zalo-oa-token}}"
-      Policies:
-        - S3ReadPolicy:
-            BucketName: !Ref ThumbnailsBucket
-      Events:
-        SNSEvent:
-          Type: SNS
-          Properties:
-            Topic: !Ref NotificationTopic
 
   # --- Notify Telegram ---
   NotifyTelegramFunction:

@@ -6,8 +6,8 @@ A complete home security system with AI-powered face recognition, built on AWS s
 
 ![Workflow](documents/workflow.png)
 
-## Tech Stack
 
+## Tech Stack
 | Layer | Technology |
 |-------|-----------|
 | **Edge** | Raspberry Pi 3B+ gateway + Imou Ranger RTSP camera (Python, OpenCV) |
@@ -409,7 +409,17 @@ python3 -m unittest discover -s tests
 cd webapp && npm run lint && npm run build
 cd ../infrastructure && sam validate --template-file template.yaml --region us-east-1
 ```
+## Result
+# Use camera imou ranger
+![Used](documents/home_recognition.png)
 
+# Use webcam laptop
+![Webcam](documents/webcam.png)
+
+# Telegram Notification Bot
+![Notify](documents/notify_webcam.png)
+Alert when no connection
+![Notify](documents/notify_no_connection.png)
 ## License
 
 MIT

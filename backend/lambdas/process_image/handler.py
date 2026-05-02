@@ -163,8 +163,6 @@ def _process_record(sqs_record: dict):
                 thumbnail_key=thumbnail_key,
             )
 
-            send_telegram_message(message["text_message"])
-
             if NOTIFICATION_TOPIC_ARN:
                 _publish_notification(message)
 
